@@ -311,11 +311,11 @@ def main():
 
             outputs = model.generate(
                 **input_tokens,
-                generation_config=generation_config,
-                lazy_mode=use_lazy_mode,
-                hpu_graphs=args.use_hpu_graphs,
-                profiling_steps=args.profiling_steps,
-                profiling_warmup_steps=args.profiling_warmup_steps,
+                #generation_config=generation_config,
+                #lazy_mode=use_lazy_mode,
+                #hpu_graphs=args.use_hpu_graphs,
+                #profiling_steps=args.profiling_steps,
+                #profiling_warmup_steps=args.profiling_warmup_steps,
             ).cpu()
             return tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
