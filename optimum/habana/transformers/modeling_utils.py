@@ -494,7 +494,7 @@ def adapt_transformers_to_gaudi():
 
     # Optimization for starcoder2 on Gaudi
     transformers.models.starcoder2.modeling_starcoder2.Starcoder2ForCausalLM = GaudiStarcoder2ForCausalLM
-    transformers.models.starcoder2.modeling_starcoder2.Starcoder2Model.forward = gaudi_starcoder2_model_forward
+    transformers.models.starcoder2.modeling_starcoder2.Starcoder2Model = GaudiStarcoder2Model
     transformers.models.starcoder2.modeling_starcoder2.Starcoder2Attention.forward = gaudi_starcoder2_attention_forward
     transformers.models.starcoder2.modeling_starcoder2.Starcoder2DecoderLayer = GaudiStarcoder2DecoderLayer
 
