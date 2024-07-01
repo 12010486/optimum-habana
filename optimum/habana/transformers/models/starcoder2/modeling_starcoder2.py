@@ -12,6 +12,7 @@ from transformers.models.starcoder2.modeling_starcoder2 import (
     Starcoder2DecoderLayer,
     Starcoder2ForCausalLM,
     Starcoder2Model,
+    Starcoder2MLP,
     apply_rotary_pos_emb,
     repeat_kv,
 )
@@ -365,11 +366,25 @@ def gaudi_starcoder2_attention_forward(
 
     return attn_output, attn_weights, past_key_value
 
-
 class GaudiStarcoder2DecoderLayer(Starcoder2DecoderLayer):
     def __init__(self, config: Starcoder2Config, layer_idx: int):
-        super().__init__(config, layer_idx)
-        self.self_attn = Starcoder2Attention(config, layer_idx)
+        super(Starcoder2DecoderLayer, self).__init__()
+        
+        self.hidden_size = config.hidden_size
+        self.self_attn = GaudiStarcoder2Attention(config, layer_idx)
+        self.mlp = Starcoder2MLP(config)
+                                        
+        self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=config.norm_epsilon)
+        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size, eps=config.norm_epsilon)
+
+    def allocate_kv_cache(self, batch_size, max_seq_len, inp_seq_len):
+        self.self_attn.allocate_kv_cache(batch_size, max_seq_len, inp_seq_len)
+
+    def reorder_kv_cache(self, beam_idx: torch.LongTensor):
+        return self.self_attn.reorder_kv_cache(beam_idx)
+
+    def update_sincos_cache(self, seq_len):
+        self.self_attn.update_sincos_cache(seq_len)
 
     def forward(
         self,
@@ -379,14 +394,15 @@ class GaudiStarcoder2DecoderLayer(Starcoder2DecoderLayer):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
         token_idx: Optional[torch.Tensor] = None,
-        **kwargs,
+        attn_softmax_bf16: Optional[bool] = False,
+        reuse_cache: Optional[bool] = False,
+        use_flash_attention: Optional[bool] = False,
+        flash_attention_recompute: Optional[bool] = False,
+        flash_attention_causal_mask: Optional[bool] = False,
+        cache_idx: int = None,                         
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
-        """
-        Copied from Starcoder2DecoderLayer.forward: https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/starcoder2/modeling_starcoder2.py
-        The only differences are:
-        - add new args token_idx
-        """
 
         residual = hidden_states
 
@@ -400,7 +416,14 @@ class GaudiStarcoder2DecoderLayer(Starcoder2DecoderLayer):
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
-            token_idx=token_idx,
+            cache_position,
+            token_idx,
+            attn_softmax_bf16,
+            reuse_cache,
+            use_flash_attention=use_flash_attention,
+            flash_attention_recompute=flash_attention_recompute,
+            flash_attention_causal_mask=flash_attention_causal_mask,
+            cache_idx=cache_idx,
         )
         hidden_states = residual + hidden_states
 
