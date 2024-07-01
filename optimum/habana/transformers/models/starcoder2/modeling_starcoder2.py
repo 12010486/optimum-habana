@@ -6,17 +6,16 @@ import torch
 from torch import nn
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.models.starcoder2.configuration_starcoder2 import Starcoder2Config
 from transformers.models.starcoder2.modeling_starcoder2 import (
     Starcoder2Attention,
-    Starcoder2Config,
     Starcoder2DecoderLayer,
     Starcoder2ForCausalLM,
     Starcoder2Model,
     Starcoder2MLP,
     apply_rotary_pos_emb,
-    repeat_kv,
+    logger,
 )
-from transformers.utils import logging
 
 from ...modeling_attn_mask_utils import (
     _gaudi_prepare_4d_causal_attention_mask,
@@ -30,8 +29,44 @@ except ImportError:
     print("Not using HPU fused kernel for apply_rotary_pos_emb")
     FusedRoPE = None
 
-logger = logging.get_logger(__name__)
+try:
+    from habana_frameworks.torch.hpex.kernels import FusedSDPA
+except ImportError:
+    print("Not using HPU fused scaled dot-product attention kernel.")
+    FusedSDPA = None
+   
+def gaudi_starcoder2_repeat_kv(
+    query_states: torch.Tensor,
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    attention_mask: torch.Tensor,
+    n_rep: int,
+):
+    batch, num_key_value_heads, kv_len, head_dim = key_states.shape
+    if n_rep == 1 or num_key_value_heads == 1:
+        return query_states, key_states, value_states, attention_mask
 
+    new_kv_shape = (batch, num_key_value_heads, 1, kv_len, head_dim)
+    key_states = key_states.reshape(new_kv_shape)
+    value_states = value_states.reshape(new_kv_shape)
+
+    batch, _, q_len, head_dim = query_states.shape
+    new_q_shape = (batch, num_key_value_heads, n_rep, q_len, head_dim)
+    query_states = query_states.reshape(new_q_shape)
+    
+    if attention_mask is not None:
+        # Add groups dim and set to 1
+        attention_mask = attention_mask.unsqueeze(1)
+        
+    return query_states, key_states, value_states, attention_mask
+
+class Matmul(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x, y):
+        return torch.matmul(x, y)
+        
 class KVCache(torch.nn.Module):
     def __init__(self):
         super(KVCache, self).__init__()
@@ -71,6 +106,236 @@ class KVCache(torch.nn.Module):
 
     def forward(self, cur, dim, idx):
         return self.update(self.cache, cur, dim, idx, self.inp_seq_len)
+
+class GaudiStarcoder2Attention(Starcoder2Attention):
+    def __init__(self, config: Starcoder2Config, layer_idx: Optional[int] = None):
+        super().__init__(config, layer_idx)
+
+        self.matmul_qk = Matmul()
+        self.matmul_av = Matmul()
+        self.k_cache = KVCache()
+        self.v_cache = KVCache()
+        self.inp_seq_len = -1
+        self.norm_factor = 1.0 / math.sqrt(self.head_dim)
+        self.block_size = 4096
+
+    def allocate_kv_cache(self, batch_size, max_seq_len, inp_seq_len):
+        cache_shape = (batch_size, self.num_key_value_heads, max_seq_len, self.head_dim)
+        device = self.k_proj.weight.device
+        dtype = self.config.torch_dtype
+        self.k_cache.allocate(inp_seq_len, dtype, device, cache_shape)
+        self.v_cache.allocate(inp_seq_len, dtype, device, cache_shape)
+
+    def update_sincos_cache(self, seq_len):
+        # Call rotary emb forward() to update cos/sin cache when infering more than self.max_position_embeddings
+        # This helps in avoiding creation of these caches during actual model forward pass and
+        # reduce memory consumption and improve performance.
+        if seq_len > self.max_position_embeddings:
+            self.max_position_embeddings = seq_len
+            _, _ = self.rotary_emb(self.k_proj.weight, seq_len=seq_len)
+
+    def reorder(self, tensor, beam_idx, dim_a, dim_b):
+        updated = tensor.index_select(0, beam_idx)
+        tensor.copy_(updated)
+
+    def reorder_kv_cache(self, beam_idx: torch.LongTensor):
+        if self.k_cache.cache is None:
+            return (None, None)
+
+        head_dim = self.k_cache.cache.size(-1)
+        seq_length = self.k_cache.cache.size(-2)
+        self.reorder(self.k_cache.cache, beam_idx, seq_length, head_dim)
+        self.reorder(self.v_cache.cache, beam_idx, seq_length, head_dim)
+        return (self.k_cache.cache.shape, self.v_cache.cache.shape)
+
+    def gaudi_flash_attn_v1(self, query_layer, key_layer, value_layer, attention_mask, dropout_rate, q_block_size):
+        """
+        Gaudi version of Flash Attention V1 to support long sequence at prompt phase
+        Causal mask is not supported in this optimization
+        """
+        q_len = query_layer.size(-2)
+        q_tiles = (q_len // q_block_size) if (q_len % q_block_size == 0) else math.ceil(q_len / q_block_size)
+        q_padding = q_tiles * q_block_size - q_len
+        query_layer = F.pad(query_layer, (0, 0, 0, q_padding), "constant", 0)
+        if attention_mask is not None:
+            attention_mask = F.pad(attention_mask, (0, 0, 0, q_padding), "constant", -10000.0)
+
+        row_o_list = []
+        for i in range(q_tiles):
+            s, e = i * q_block_size, (i + 1) * q_block_size
+            row_q = query_layer[:, :, s:e, :]
+            row_mask = attention_mask[:, :, s:e, :]
+            attn_output_partial = FusedSDPA.apply(row_q, key_layer, value_layer, row_mask, dropout_rate, False, None)
+            row_o_list.append(attn_output_partial)
+        attn_output = torch.cat(row_o_list, dim=-2)
+
+        if q_padding != 0:
+            attn_output = attn_output[:, :, :-q_padding, :]
+
+        return attn_output
+
+#    def pre_attn_forward(
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        token_idx: Optional[torch.Tensor] = None,
+        attn_softmax_bf16: Optional[bool] = False,
+        reuse_cache: Optional[bool] = False,
+        use_flash_attention: Optional[bool] = False,
+        flash_attention_recompute: Optional[bool] = False,
+        flash_attention_causal_mask: Optional[bool] = False,
+        cache_idx: int = None,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        """
+        The only differences are:
+        - add new args token_idx
+        - optimize KV cache
+        - add new args attn_softmax_bf16
+        - add new args reuse_cache
+        - add new args use_flash_attention
+        - add new arg flash_attention_recompute
+        """
+        if "padding_mask" in kwargs:
+            warnings.warn(
+                "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
+            )
+
+        bsz, q_len, _ = hidden_states.size()
+
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+        kv_seq_len = key_states.shape[-2]
+        if past_key_value is not None:
+            if token_idx is None:
+                if hasattr(past_key_value, "get_usable_length"):
+                    kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+                else:
+                    kv_seq_len += past_key_value[0].shape[-2]
+            else:
+                if reuse_cache:
+                    kv_seq_len = past_key_value[0][-2]
+                else:
+                    kv_seq_len = past_key_value[0].shape[-2]
+
+        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        query_states, key_states = apply_customized_rope(query_states, key_states, cos, sin, position_ids)
+
+        if use_cache:
+            # reuse k, v, self_attention
+            if reuse_cache:
+                key_states = self.k_cache(key_states, 2, token_idx)
+                value_states = self.v_cache(value_states, 2, token_idx)
+                past_key_value = (self.k_cache.get_shape(), self.v_cache.get_shape())
+            else:
+                if past_key_value is None:
+                    past_key = torch.zeros(key_states.shape, dtype=self.k_proj.weight.dtype, device=key_states.device)
+                    past_value = torch.zeros(
+                        key_states.shape, dtype=self.k_proj.weight.dtype, device=key_states.device
+                    )
+                    past_key_value = (past_key, past_value)
+                key_states = self.k_cache.update(past_key_value[0], key_states, 2, token_idx, self.inp_seq_len)
+                value_states = self.v_cache.update(past_key_value[1], value_states, 2, token_idx, self.inp_seq_len)
+                if token_idx is None:
+                    past_key_value = (key_states, value_states)
+
+            if cache_idx is not None and q_len == 1:
+                key_states = key_states[:, :, :cache_idx, :]
+                value_states = value_states[:, :, :cache_idx, :]
+                if attention_mask is not None:
+                    attention_mask = attention_mask[:, :, :, :cache_idx]
+                kv_seq_len = key_states.shape[-2]
+        else:
+            past_key_value = None
+
+        if use_flash_attention and FusedSDPA:
+            import habana_frameworks.torch.hpu as ht
+
+            if q_len == 1:
+                # next token
+                with ht.sdp_kernel(enable_recompute=False):
+                    attn_output = FusedSDPA.apply(
+                        query_states, key_states, value_states, attention_mask, 0.0, False, None
+                    )
+            else:
+                # first token
+                if flash_attention_causal_mask:
+                    # causal masking on first token requires inputs to be of the same length
+                    with ht.sdp_kernel(enable_recompute=flash_attention_recompute):
+                        attn_output = FusedSDPA.apply(query_states, key_states, value_states, None, 0.0, True, None)
+                else:
+                    with ht.sdp_kernel(enable_recompute=flash_attention_recompute):
+                        if q_len > 8192:
+                            attn_output = self.gaudi_flash_attn_v1(
+                                query_states, key_states, value_states, attention_mask, 0.0, self.block_size
+                            )
+                            htcore.mark_step()
+                        else:
+                            attn_output = FusedSDPA.apply(
+                                query_states, key_states, value_states, attention_mask, 0.0, False, None
+                            )
+
+        else:
+            query_states, key_states, value_states, attention_mask = gaudi_qwen2_repeat_kv(
+                query_states, key_states, value_states, attention_mask, self.num_key_value_groups
+            )
+
+            attn_weights = self.matmul_qk(query_states, key_states.transpose(-2, -1)) / math.sqrt(self.head_dim)
+
+            if attention_mask is not None:  # no matter the length, we just slice it
+                causal_mask = attention_mask
+                if cache_position is not None:
+                    causal_mask = attention_mask[:, :, cache_position, : key_states.shape[-2]]
+                attn_weights = attn_weights + causal_mask
+
+            if attn_softmax_bf16:
+                attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1, dtype=query_states.dtype)
+            else:
+                # upcast attention to fp32
+                attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
+                    query_states.dtype
+                )
+            attn_weights = torch.nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+            attn_output = self.matmul_av(attn_weights, value_states)
+            attn_output = attn_output.reshape(bsz, -1, q_len, self.head_dim)
+
+        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+            raise ValueError(
+                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                f" {attn_output.size()}"
+            )
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+
+        attn_output = self.o_proj(attn_output)
+
+        if not output_attentions:
+            attn_weights = None
+
+        return attn_output, attn_weights, past_key_value
+
+#    def attention_all_reduce(self, attn_output):
+#        if hasattr(self.o_proj, "all_reduce"):
+#            self.o_proj.all_reduce(attn_output)
+
+#    def post_attn_forward(self, attn_output):
+#        if hasattr(self.o_proj, "post_all_reduce"):
+#            self.o_proj.post_all_reduce(attn_output)
+#        return attn_output
 
 class GaudiStarcoder2Model(Starcoder2Model):
     def allocate_kv_cache(self, batch_size, max_seq_len, inp_seq_len):
@@ -261,110 +526,6 @@ class GaudiStarcoder2Model(Starcoder2Model):
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
         )  
-        
-def gaudi_starcoder2_attention_forward(
-    self,
-    hidden_states: torch.Tensor,
-    attention_mask: Optional[torch.Tensor] = None,
-    position_ids: Optional[torch.LongTensor] = None,
-    past_key_value: Optional[Cache] = None,
-    output_attentions: bool = False,
-    use_cache: bool = False,
-    token_idx: Optional[torch.Tensor] = None,
-    **kwargs,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-    """
-    Copied from Starcoder2Attention.forward: https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/starcoder2/modeling_starcoder2.py
-    The only differences are:
-    - add new args token_idx
-    - optimize KV cache
-    """
-    if "padding_mask" in kwargs:
-        warnings.warn(
-            "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
-        )
-    bsz, q_len, _ = hidden_states.size()
-    self.norm_factor = 1.0 / math.sqrt(self.head_dim)
-
-    query_states = self.q_proj(hidden_states)
-    key_states = self.k_proj(hidden_states)
-    value_states = self.v_proj(hidden_states)
-
-    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-    key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-    value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
-    kv_seq_len = key_states.shape[-2]
-    if past_key_value is not None:
-        if self.layer_idx is None:
-            raise ValueError(
-                f"The cache structure has changed since version v4.36. If you are using {self.__class__.__name__} "
-                "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
-                "with a layer index."
-            )
-        if token_idx is not None and past_key_value.get_usable_length(kv_seq_len, self.layer_idx) > 0:
-            # When token_idx is used, static seq len = (input token len + max output token len)
-            kv_seq_len = past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-        else:
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-    cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-    query_states, key_states = apply_customized_rope(query_states, key_states, cos, sin, position_ids, self.training)
-
-    if past_key_value is not None:
-        if token_idx is not None:
-            if 0 <= self.layer_idx < len(past_key_value.key_cache):
-                past_key_value.key_cache[self.layer_idx].index_copy_(2, token_idx - 1, key_states)
-                past_key_value.value_cache[self.layer_idx].index_copy_(2, token_idx - 1, value_states)
-                key_states = past_key_value.key_cache[self.layer_idx]
-                value_states = past_key_value.value_cache[self.layer_idx]
-            else:
-                past_key_value.key_cache.append(key_states)
-                past_key_value.value_cache.append(value_states)
-        else:
-            cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-    # repeat k/v heads if n_kv_heads < n_heads
-    key_states = repeat_kv(key_states, self.num_key_value_groups)
-    value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-    attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * self.norm_factor
-
-    if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
-        raise ValueError(
-            f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
-            f" {attn_weights.size()}"
-        )
-
-    if attention_mask is not None:
-        if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-            raise ValueError(
-                f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-            )
-
-        attn_weights = attn_weights + attention_mask
-
-    # upcast attention to fp32
-    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-    attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-    attn_output = torch.matmul(attn_weights, value_states)
-
-    if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-        raise ValueError(
-            f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-            f" {attn_output.size()}"
-        )
-
-    attn_output = attn_output.transpose(1, 2).contiguous()
-    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
-
-    attn_output = self.o_proj(attn_output)
-    attn_output = nn.functional.dropout(attn_output, p=self.residual_dropout, training=self.training)
-
-    if not output_attentions:
-        attn_weights = None
-
-    return attn_output, attn_weights, past_key_value
 
 class GaudiStarcoder2DecoderLayer(Starcoder2DecoderLayer):
     def __init__(self, config: Starcoder2Config, layer_idx: int):
