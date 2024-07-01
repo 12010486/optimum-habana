@@ -435,12 +435,12 @@ class GaudiStarcoder2Model(Starcoder2Model):
         # HPU specific mask generation
         attention_mask = _gaudi_prepare_4d_causal_attention_mask(
             attention_mask,
-            input_ids.shape if input_ids is not None else (batch_size, seq_length),
+            (batch_size, seq_length),
             inputs_embeds,
             past_seen_tokens,
             sliding_window=self.config.sliding_window,
         )
-        
+
         # embed positions
         hidden_states = inputs_embeds
         hidden_states = nn.functional.dropout(hidden_states, p=self.embedding_dropout, training=self.training)
