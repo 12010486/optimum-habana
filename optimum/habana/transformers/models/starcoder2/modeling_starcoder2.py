@@ -571,22 +571,23 @@ class GaudiStarcoder2DecoderLayer(Starcoder2DecoderLayer):
 
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
+            hidden_states,
+            attention_mask,
+            position_ids,
+            past_key_value,
+            output_attentions,
+            use_cache,
             cache_position,
             token_idx,
             attn_softmax_bf16,
             reuse_cache,
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
             use_flash_attention=use_flash_attention,
             flash_attention_recompute=flash_attention_recompute,
             flash_attention_causal_mask=flash_attention_causal_mask,
             cache_idx=cache_idx,
             
         )
+        
         hidden_states = residual + hidden_states
 
         # Fully Connected
