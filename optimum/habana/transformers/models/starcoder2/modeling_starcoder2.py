@@ -577,14 +577,14 @@ class GaudiStarcoder2DecoderLayer(Starcoder2DecoderLayer):
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
-            cache_position,
-            token_idx,
-            attn_softmax_bf16,
-            reuse_cache,
             use_flash_attention=use_flash_attention,
             flash_attention_recompute=flash_attention_recompute,
             flash_attention_causal_mask=flash_attention_causal_mask,
             cache_idx=cache_idx,
+            cache_position,
+            token_idx,
+            attn_softmax_bf16,
+            reuse_cache,
         )
         hidden_states = residual + hidden_states
 
