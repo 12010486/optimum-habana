@@ -231,7 +231,7 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
                     kv_seq_len = past_key_value[0].shape[-2]
 
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        query_states, key_states = apply_customized_rope(query_states, key_states, cos, sin, position_ids)
+        query_states, key_states = apply_customized_rope(query_states, key_states, cos, sin, position_ids, is_training=self.training)
 
         if use_cache:
             # reuse k, v, self_attention
@@ -288,7 +288,7 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
                             )
 
         else:
-            query_states, key_states, value_states, attention_mask = gaudi_qwen2_repeat_kv(
+            query_states, key_states, value_states, attention_mask = gaudi_starcoder2_repeat_kv(
                 query_states, key_states, value_states, attention_mask, self.num_key_value_groups
             )
 
