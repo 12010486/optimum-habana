@@ -292,7 +292,7 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
                 query_states, key_states, value_states, attention_mask, self.num_key_value_groups
             )
 
-            attn_weights = self.matmul_qk(query_states, key_states.transpose(-2, -1)) / math.sqrt(self.head_dim)
+            attn_weights = self.matmul_qk(query_states, key_states.transpose(-2, -1)) * self.norm_factor
 
             if attention_mask is not None:  # no matter the length, we just slice it
                 causal_mask = attention_mask
