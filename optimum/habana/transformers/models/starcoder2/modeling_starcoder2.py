@@ -260,11 +260,10 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
         else:
             past_key_value = None
 
-        query_length = q_len if past_key_value is None else q_len + past_key_value.key_cache[self.layer_idx].shape[2]
         if use_flash_attention and FusedSDPA:
             import habana_frameworks.torch.hpu as ht
 
-            if query_length == 1:
+            if q_len == 1:
                 # next token
                 with ht.sdp_kernel(enable_recompute=False):
                     attn_output = FusedSDPA.apply(
@@ -278,7 +277,7 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
                         attn_output = FusedSDPA.apply(query_states, key_states, value_states, None, 0.0, True, None)
                 else:
                     with ht.sdp_kernel(enable_recompute=flash_attention_recompute):
-                        if query_length > 8192:
+                        if q_len > 8192:
                             attn_output = self.gaudi_flash_attn_v1(
                                 query_states, key_states, value_states, attention_mask, 0.0, self.block_size
                             )
@@ -310,17 +309,17 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
                 )
             attn_weights = torch.nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
             attn_output = self.matmul_av(attn_weights, value_states)
-            attn_output = attn_output.reshape(bsz, -1, query_length, self.head_dim)
+            attn_output = attn_output.reshape(bsz, -1, q_len, self.head_dim)
 
-        if attn_output.size() != (bsz, self.num_heads, query_length, self.head_dim):
+        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, query_length, self.head_dim)}, but is"
+                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
                 f" {attn_output.size()}"
             )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
 
-        attn_output = attn_output.reshape(bsz, query_length, self.hidden_size)
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
         attn_output = self.o_proj(attn_output)
 
@@ -413,7 +412,7 @@ class GaudiStarcoder2Model(Starcoder2Model):
                         past_key_values = DynamicCache.from_legacy_cache(past_key_values)
                     past_seen_tokens = past_key_values.get_usable_length(seq_length)
                 else:
-                    past_seen_tokens = past_key_values[0][0].shape[2]
+                    past_seen_tokens = past_key_values[0][0].shape[2] - seq_length
 
         if position_ids is None:
             position_ids = torch.arange(
@@ -436,7 +435,7 @@ class GaudiStarcoder2Model(Starcoder2Model):
         # HPU specific mask generation
         attention_mask = _gaudi_prepare_4d_causal_attention_mask(
             attention_mask,
-            (batch_size, seq_length),
+            input_ids.shape if input_ids is not None else (batch_size, seq_length),
             inputs_embeds,
             past_seen_tokens,
             sliding_window=self.config.sliding_window,
