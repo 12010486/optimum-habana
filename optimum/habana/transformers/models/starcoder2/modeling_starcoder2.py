@@ -260,7 +260,7 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
         else:
             past_key_value = None
 
-	query_length = q_len if past_key_value is None else q_len + past_key_value.key_cache[self.layer_idx].shape[2]
+        query_length = q_len if past_key_value is None else q_len + past_key_value.key_cache[self.layer_idx].shape[2]
         if use_flash_attention and FusedSDPA:
             import habana_frameworks.torch.hpu as ht
 
