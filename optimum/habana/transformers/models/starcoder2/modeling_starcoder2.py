@@ -225,13 +225,13 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
                     "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
                     "with a layer index."
                 )
-            
-            if token_idx is None:
+                        
+             if token_idx is None:
                 if hasattr(past_key_value, "get_usable_length"):
                     kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
                 else:
                     kv_seq_len += past_key_value[self.layer_idx].shape[-2]
-            else:
+             else:
                 if reuse_cache:
                     kv_seq_len = past_key_value[self.layer_idx][-2]
                 else:
