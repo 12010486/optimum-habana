@@ -219,19 +219,30 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
+             if self.layer_idx is None:
+                raise ValueError(
+                    f"The cache structure has changed since version v4.36. If you are using {self.__class__.__name__} "
+                    "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
+                    "with a layer index."
+                )
+            
             if token_idx is None:
                 if hasattr(past_key_value, "get_usable_length"):
                     kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
                 else:
-                    kv_seq_len += past_key_value[0].shape[-2]
+                    kv_seq_len += past_key_value[self.layer_idx].shape[-2]
             else:
                 if reuse_cache:
-                    kv_seq_len = past_key_value[0][-2]
+                    kv_seq_len = past_key_value[self.layer_idx][-2]
                 else:
-                    kv_seq_len = past_key_value[0].shape[-2]
+                    kv_seq_len = past_key_value[self.layer_idx].shape[-2]
 
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         query_states, key_states = apply_customized_rope(query_states, key_states, cos, sin, position_ids, is_training=self.training)
+        
+        #if past_key_value is not None:
+        #    cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
+        #    key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         if use_cache:
             # reuse k, v, self_attention
@@ -256,6 +267,7 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
                 value_states = value_states[:, :, :cache_idx, :]
                 if attention_mask is not None:
                     attention_mask = attention_mask[:, :, :, :cache_idx]
+                    
                 kv_seq_len = key_states.shape[-2]
         else:
             past_key_value = None
@@ -288,16 +300,23 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
                             )
 
         else:
+        
             query_states, key_states, value_states, attention_mask = gaudi_starcoder2_repeat_kv(
-                query_states, key_states, value_states, attention_mask, self.num_key_value_groups
-            )
-
+                query_states, key_states, value_states, attention_mask, self.num_key_value_groups)
+            
             attn_weights = self.matmul_qk(query_states, key_states.transpose(-2, -1)) * self.norm_factor
 
+            if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
+                raise ValueError(
+                    f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
+                    f" {attn_weights.size()}"
+                )
+            
             if attention_mask is not None:  # no matter the length, we just slice it
-                causal_mask = attention_mask
                 if cache_position is not None:
                     causal_mask = attention_mask[:, :, cache_position, : key_states.shape[-2]]
+                else:
+                    causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
                 attn_weights = attn_weights + causal_mask
 
             if attn_softmax_bf16:
@@ -318,14 +337,14 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
             )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
-
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
         attn_output = self.o_proj(attn_output)
+        attn_output = nn.functional.dropout(attn_output, p=self.residual_dropout, training=self.training)
 
         if not output_attentions:
             attn_weights = None
-
+            
         return attn_output, attn_weights, past_key_value
 
 #    def attention_all_reduce(self, attn_output):
