@@ -14,6 +14,7 @@ from transformers.models.starcoder2.modeling_starcoder2 import (
     Starcoder2Model,
     Starcoder2MLP,
     apply_rotary_pos_emb,
+    repeat_kv,
     logger,
 )
 
@@ -35,7 +36,7 @@ except ImportError:
     print("Not using HPU fused scaled dot-product attention kernel.")
     FusedSDPA = None
    
-def gaudi_starcoder2_repeat_kv(
+""" def gaudi_starcoder2_repeat_kv(
     query_states: torch.Tensor,
     key_states: torch.Tensor,
     value_states: torch.Tensor,
@@ -59,6 +60,7 @@ def gaudi_starcoder2_repeat_kv(
         attention_mask = attention_mask.unsqueeze(1)
         
     return query_states, key_states, value_states, attention_mask
+"""
 
 class Matmul(torch.nn.Module):
     def __init__(self):
@@ -230,12 +232,12 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
                 if hasattr(past_key_value, "get_usable_length"):
                     kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
                 else:
-                    kv_seq_len += past_key_value[self.layer_idx].shape[-2]
+                    kv_seq_len += past_key_value[0].shape[-2]
              else:
                 if reuse_cache:
-                    kv_seq_len = past_key_value[self.layer_idx][-2]
+                    kv_seq_len = past_key_value[0][-2]
                 else:
-                    kv_seq_len = past_key_value[self.layer_idx].shape[-2]
+                    kv_seq_len = past_key_value[0].shape[-2]
 
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         query_states, key_states = apply_customized_rope(query_states, key_states, cos, sin, position_ids, is_training=self.training)
@@ -301,9 +303,11 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
 
         else:
         
-            query_states, key_states, value_states, attention_mask = gaudi_starcoder2_repeat_kv(
-                query_states, key_states, value_states, attention_mask, self.num_key_value_groups)
-            
+            # query_states, key_states, value_states, attention_mask = repeat_kv(
+            #     query_states, key_states, value_states, attention_mask, self.num_key_value_groups)
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
+
             attn_weights = self.matmul_qk(query_states, key_states.transpose(-2, -1)) * self.norm_factor
 
             if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
@@ -431,7 +435,7 @@ class GaudiStarcoder2Model(Starcoder2Model):
                         past_key_values = DynamicCache.from_legacy_cache(past_key_values)
                     past_seen_tokens = past_key_values.get_usable_length(seq_length)
                 else:
-                    past_seen_tokens = past_key_values[0][0].shape[2] - seq_length
+                    past_seen_tokens = past_key_values[0][0].shape[2]
 
         if position_ids is None:
             position_ids = torch.arange(
