@@ -36,32 +36,6 @@ except ImportError:
     print("Not using HPU fused scaled dot-product attention kernel.")
     FusedSDPA = None
    
-""" def gaudi_starcoder2_repeat_kv(
-    query_states: torch.Tensor,
-    key_states: torch.Tensor,
-    value_states: torch.Tensor,
-    attention_mask: torch.Tensor,
-    n_rep: int,
-):
-    batch, num_key_value_heads, kv_len, head_dim = key_states.shape
-    if n_rep == 1 or num_key_value_heads == 1:
-        return query_states, key_states, value_states, attention_mask
-
-    new_kv_shape = (batch, num_key_value_heads, 1, kv_len, head_dim)
-    key_states = key_states.reshape(new_kv_shape)
-    value_states = value_states.reshape(new_kv_shape)
-
-    batch, _, q_len, head_dim = query_states.shape
-    new_q_shape = (batch, num_key_value_heads, n_rep, q_len, head_dim)
-    query_states = query_states.reshape(new_q_shape)
-    
-    if attention_mask is not None:
-        # Add groups dim and set to 1
-        attention_mask = attention_mask.unsqueeze(1)
-        
-    return query_states, key_states, value_states, attention_mask
-"""
-
 class Matmul(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -69,64 +43,15 @@ class Matmul(torch.nn.Module):
     def forward(self, x, y):
         return torch.matmul(x, y)
         
-class KVCache(torch.nn.Module):
-    def __init__(self):
-        super(KVCache, self).__init__()
-        self.cache = None
-        self.inp_seq_len = -1
-
-    def allocate(self, inp_seq_len, dtype, device, shape):
-        if self.cache is None or self.cache.shape != shape:
-            self.inp_seq_len = inp_seq_len
-            self.cache = torch.zeros(shape, dtype=dtype, device=device)
-        else:
-            assert (
-                self.inp_seq_len == inp_seq_len
-            ), f"inp_seq_len must be the same. self.inp_seq_len:{self.inp_seq_len} inp_seq_len:{inp_seq_len}"
-            self.cache.fill_(0)
-
-    def update(self, prev, cur, dim, idx, inp_seq_len):
-        orig_cur = cur
-        if prev.shape == cur.shape:
-            prev.copy_(cur)
-            return orig_cur
-        if cur.shape[2] > 1 and cur.shape[2] <= prev.shape[2]:
-            # Initialize
-            prev[:, :, :inp_seq_len, :].copy_(cur)
-            return orig_cur
-        assert cur.shape[2] == 1, f"Cannot update kv-cache. Unsupported shapes. prev:{prev.shape} cur:{cur.shape}"
-        if idx is not None:
-            prev.index_copy_(dim, idx - 1, cur)
-            return prev
-        else:
-            return torch.cat((prev, cur), dim=dim)
-
-    def get_shape(self):
-        if self.cache is None:
-            return None
-        return self.cache.shape
-
-    def forward(self, cur, dim, idx):
-        return self.update(self.cache, cur, dim, idx, self.inp_seq_len)
-
 class GaudiStarcoder2Attention(Starcoder2Attention):
     def __init__(self, config: Starcoder2Config, layer_idx: Optional[int] = None):
         super().__init__(config, layer_idx)
 
         self.matmul_qk = Matmul()
         self.matmul_av = Matmul()
-        self.k_cache = KVCache()
-        self.v_cache = KVCache()
         self.inp_seq_len = -1
         self.norm_factor = 1.0 / math.sqrt(self.head_dim)
         self.block_size = 4096
-
-    def allocate_kv_cache(self, batch_size, max_seq_len, inp_seq_len):
-        cache_shape = (batch_size, self.num_key_value_heads, max_seq_len, self.head_dim)
-        device = self.k_proj.weight.device
-        dtype = self.config.torch_dtype
-        self.k_cache.allocate(inp_seq_len, dtype, device, cache_shape)
-        self.v_cache.allocate(inp_seq_len, dtype, device, cache_shape)
 
     def update_sincos_cache(self, seq_len):
         # Call rotary emb forward() to update cos/sin cache when infering more than self.max_position_embeddings
@@ -228,24 +153,16 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
                     "with a layer index."
                 )
                         
-             if token_idx is None:
-                if hasattr(past_key_value, "get_usable_length"):
-                    kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-                else:
-                    kv_seq_len += past_key_value[0].shape[-2]
+             if token_idx is not None and past_key_value.get_usable_length(kv_seq_len, self.layer_idx) > 0:
+                # When token_idx is used, static seq len = (input token len + max output token len)
+                kv_seq_len = past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
              else:
-                if reuse_cache:
-                    kv_seq_len = past_key_value[0][-2]
-                else:
-                    kv_seq_len = past_key_value[0].shape[-2]
-
+                kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+        
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         query_states, key_states = apply_customized_rope(query_states, key_states, cos, sin, position_ids, is_training=self.training)
         
-        #if past_key_value is not None:
-        #    cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
-        #    key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
+        """         
         if use_cache:
             # reuse k, v, self_attention
             if reuse_cache:
@@ -272,7 +189,38 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
                     
                 kv_seq_len = key_states.shape[-2]
         else:
-            past_key_value = None
+            past_key_value = None """
+
+        if use_cache:
+            # if past_key_value is None:
+            #     past_key = torch.zeros(key_states.shape, dtype=self.k_proj.weight.dtype, device=key_states.device)
+            #     past_value = torch.zeros(
+            #             key_states.shape, dtype=self.k_proj.weight.dtype, device=key_states.device)
+            #     past_key_value.key_cache[0] = past_key
+            #     past_key_value.value_cache[0] = past_value
+            if past_key_value is not None:
+                if token_idx is not None:
+                    if 0 <= self.layer_idx < len(past_key_value.key_cache):
+                        past_key_value.key_cache[self.layer_idx].index_copy_(2, token_idx - 1, key_states)
+                        past_key_value.value_cache[self.layer_idx].index_copy_(2, token_idx - 1, value_states)
+                        key_states = past_key_value.key_cache[self.layer_idx]
+                        value_states = past_key_value.value_cache[self.layer_idx]
+                    else:
+                        past_key_value.key_cache.append(key_states)
+                        past_key_value.value_cache.append(value_states)
+                else:
+                    cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
+                    key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+            if cache_idx is not None and q_len == 1:
+                key_states = key_states[:, :, :cache_idx, :]
+                value_states = value_states[:, :, :cache_idx, :]
+                if attention_mask is not None:
+                    attention_mask = attention_mask[:, :, :, :cache_idx]
+                    
+                kv_seq_len = key_states.shape[-2]
+#        else:
+#            past_key_value = None   
 
         if use_flash_attention and FusedSDPA:
             import habana_frameworks.torch.hpu as ht
@@ -302,9 +250,7 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
                             )
 
         else:
-        
-            # query_states, key_states, value_states, attention_mask = repeat_kv(
-            #     query_states, key_states, value_states, attention_mask, self.num_key_value_groups)
+            # repeat k/v heads if n_kv_heads < n_heads
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
@@ -361,6 +307,11 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
 #        return attn_output
 
 class GaudiStarcoder2Model(Starcoder2Model):
+    def __init__(self, config: Starcoder2Config, layer_idx: Optional[int] = None):
+        super().__init__(config)
+        # Initialize weights and apply final processing
+        #self.post_init()
+
     def allocate_kv_cache(self, batch_size, max_seq_len, inp_seq_len):
         for layer in self.layers:
             layer.allocate_kv_cache(batch_size, max_seq_len, inp_seq_len)
@@ -422,20 +373,14 @@ class GaudiStarcoder2Model(Starcoder2Model):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
     
-        use_new_cache = False  # Ignoring new Cache path for HPU
         past_seen_tokens = 0
 
-        if past_key_values is not None and use_cache:  # kept for BC (cache positions)
-            if reuse_cache:
-                past_seen_tokens = past_key_values[0][0][2]
-            else:
-                if use_new_cache:
-                    use_legacy_cache = not isinstance(past_key_values, Cache)
-                    if use_legacy_cache:
-                        past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-                    past_seen_tokens = past_key_values.get_usable_length(seq_length)
-                else:
-                    past_seen_tokens = past_key_values[0][0].shape[2]
+        if use_cache:
+            use_legacy_cache = not isinstance(past_key_values, Cache)
+            if use_legacy_cache:
+                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+            if token_idx is None:
+                past_seen_tokens = past_key_values.get_usable_length(seq_length)
 
         if position_ids is None:
             position_ids = torch.arange(
@@ -471,12 +416,12 @@ class GaudiStarcoder2Model(Starcoder2Model):
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
-        next_decoder_cache = () if not use_new_cache else None
+        next_decoder_cache = None
 
         if lazy_mode:
             htcore.mark_step()
 
-        for layer_idx, decoder_layer in enumerate(self.layers):
+        for decoder_layer in self.layers:
             if (
                 lazy_mode
                 and not self.training
@@ -509,7 +454,7 @@ class GaudiStarcoder2Model(Starcoder2Model):
                     hidden_states,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
-                    past_key_value=None if past_key_values is None else past_key_values[layer_idx],
+                    past_key_value=past_key_values,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
@@ -523,9 +468,9 @@ class GaudiStarcoder2Model(Starcoder2Model):
                 )
 
             hidden_states = layer_outputs[0]
-
+            
             if use_cache:
-                next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
+                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
@@ -538,9 +483,8 @@ class GaudiStarcoder2Model(Starcoder2Model):
          
         next_cache = None
         if use_cache:
-            next_cache = (
-                next_decoder_cache.to_legacy_cache() if isinstance(next_decoder_cache, Cache) else next_decoder_cache
-            )
+            next_cache = next_decoder_cache.to_legacy_cache() if use_legacy_cache else next_decoder_cache
+        
         if not return_dict:
             return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
         return BaseModelOutputWithPast(
@@ -630,6 +574,10 @@ class GaudiStarcoder2DecoderLayer(Starcoder2DecoderLayer):
         return outputs
 
 class GaudiStarcoder2ForCausalLM(Starcoder2ForCausalLM):
+    def __init__(self, config):
+        super().__init__(config)
+        self.model = GaudiStarcoder2Model(config)
+
     def allocate_kv_cache(self, batch_size, max_seq_len, inp_seq_len):
         self.model.allocate_kv_cache(batch_size, max_seq_len, inp_seq_len)
 
