@@ -243,7 +243,7 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
                             attn_output = self.gaudi_flash_attn_v1(
                                 query_states, key_states, value_states, attention_mask, 0.0, self.block_size
                             )
-                            htcore.mark_step()
+                            # htcore.mark_step()
                         else:
                             attn_output = FusedSDPA.apply(
                                 query_states, key_states, value_states, attention_mask, 0.0, False, None
@@ -418,16 +418,16 @@ class GaudiStarcoder2Model(Starcoder2Model):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        if lazy_mode:
-            htcore.mark_step()
+        # if lazy_mode:
+        #     htcore.mark_step()
 
         for decoder_layer in self.layers:
-            if (
-                lazy_mode
-                and not self.training
-                and (torch.distributed.is_initialized() is False or torch.distributed.get_world_size() == 1)
-            ):
-                htcore.mark_step()
+            # if (
+            #     lazy_mode
+            #     and not self.training
+            #     and (torch.distributed.is_initialized() is False or torch.distributed.get_world_size() == 1)
+            # ):
+                #htcore.mark_step()    
 
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
