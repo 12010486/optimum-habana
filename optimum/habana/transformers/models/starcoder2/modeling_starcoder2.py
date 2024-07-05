@@ -3,6 +3,7 @@ import warnings
 from typing import List, Optional, Tuple, Union
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
@@ -35,23 +36,82 @@ try:
 except ImportError:
     print("Not using HPU fused scaled dot-product attention kernel.")
     FusedSDPA = None
-   
+
+#  FusedScaledDotProductAttention
+class ModuleFusedSDPA(torch.nn.Module):
+    def __init__(self, fusedSDPA):
+        super().__init__()
+        self._hpu_kernel_fsdpa = fusedSDPA
+
+    def forward(self, query, key, value, attn_mask, dropout_p, is_casual, scale, softmax_mode):
+        return self._hpu_kernel_fsdpa.apply(query, key, value, attn_mask, dropout_p, is_casual, scale, softmax_mode)
+    
 class Matmul(torch.nn.Module):
     def __init__(self):
         super().__init__()
 
     def forward(self, x, y):
         return torch.matmul(x, y)
-        
+
+class KVCache(torch.nn.Module):
+    def __init__(self):
+        super(KVCache, self).__init__()
+        self.cache = None
+        self.inp_seq_len = -1
+
+    def allocate(self, inp_seq_len, dtype, device, shape):
+        if self.cache is None or self.cache.shape != shape:
+            self.inp_seq_len = inp_seq_len
+            self.cache = torch.zeros(shape, dtype=dtype, device=device)
+        else:
+            assert (
+                self.inp_seq_len == inp_seq_len
+            ), f"inp_seq_len must be the same. self.inp_seq_len:{self.inp_seq_len} inp_seq_len:{inp_seq_len}"
+            self.cache.fill_(0)
+
+    def update(self, prev, cur, dim, idx, inp_seq_len):
+        orig_cur = cur
+        if prev.shape == cur.shape:
+            prev.copy_(cur)
+            return orig_cur
+        if cur.shape[2] > 1 and cur.shape[2] <= prev.shape[2]:
+            # Initialize
+            prev[:, :, :inp_seq_len, :].copy_(cur)
+            return orig_cur
+        assert cur.shape[2] == 1, f"Cannot update kv-cache. Unsupported shapes. prev:{prev.shape} cur:{cur.shape}"
+        if idx is not None:
+            prev.index_copy_(dim, idx - 1, cur)
+            return prev
+        else:
+            return torch.cat((prev, cur), dim=dim)
+
+    def get_shape(self):
+        if self.cache is None:
+            return None
+        return self.cache.shape
+
+    def forward(self, cur, dim, idx):
+        return self.update(self.cache, cur, dim, idx, self.inp_seq_len)
+
 class GaudiStarcoder2Attention(Starcoder2Attention):
     def __init__(self, config: Starcoder2Config, layer_idx: Optional[int] = None):
         super().__init__(config, layer_idx)
 
         self.matmul_qk = Matmul()
         self.matmul_av = Matmul()
+        self.k_cache = KVCache()
+        self.v_cache = KVCache()
+        self.fused_scaled_dot_product_attention = ModuleFusedSDPA(FusedSDPA) if FusedSDPA else None
         self.inp_seq_len = -1
         self.norm_factor = 1.0 / math.sqrt(self.head_dim)
         self.block_size = 4096
+
+    def allocate_kv_cache(self, batch_size, max_seq_len, inp_seq_len):
+        cache_shape = (batch_size, self.num_key_value_heads, max_seq_len, self.head_dim)
+        device = self.k_proj.weight.device
+        dtype = self.config.torch_dtype
+        self.k_cache.allocate(inp_seq_len, dtype, device, cache_shape)
+        self.v_cache.allocate(inp_seq_len, dtype, device, cache_shape)
 
     def update_sincos_cache(self, seq_len):
         # Call rotary emb forward() to update cos/sin cache when infering more than self.max_position_embeddings
@@ -92,7 +152,8 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
             s, e = i * q_block_size, (i + 1) * q_block_size
             row_q = query_layer[:, :, s:e, :]
             row_mask = attention_mask[:, :, s:e, :]
-            attn_output_partial = FusedSDPA.apply(row_q, key_layer, value_layer, row_mask, dropout_rate, False, None)
+            attn_output_partial = self.fused_scaled_dot_product_attention(
+                        row_q, key_layer, value_layer, row_mask, dropout_rate, False, None, None)
             row_o_list.append(attn_output_partial)
         attn_output = torch.cat(row_o_list, dim=-2)
 
@@ -228,15 +289,15 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
             if q_len == 1:
                 # next token
                 with ht.sdp_kernel(enable_recompute=False):
-                    attn_output = FusedSDPA.apply(
-                        query_states, key_states, value_states, attention_mask, 0.0, False, None
-                    )
+                    attn_output = self.fused_scaled_dot_product_attention(
+                        query_states, key_states, value_states, attention_mask, 0.0, False, None, None)
             else:
                 # first token
                 if flash_attention_causal_mask:
                     # causal masking on first token requires inputs to be of the same length
                     with ht.sdp_kernel(enable_recompute=flash_attention_recompute):
-                        attn_output = FusedSDPA.apply(query_states, key_states, value_states, None, 0.0, True, None)
+                        attn_output = self.fused_scaled_dot_product_attention(
+                        query_states, key_states, value_states, None, 0.0, True, None, None)
                 else:
                     with ht.sdp_kernel(enable_recompute=flash_attention_recompute):
                         if q_len > 8192:
@@ -245,10 +306,9 @@ class GaudiStarcoder2Attention(Starcoder2Attention):
                             )
                             # htcore.mark_step()
                         else:
-                            attn_output = FusedSDPA.apply(
-                                query_states, key_states, value_states, attention_mask, 0.0, False, None
-                            )
-
+                            attn_output = self.fused_scaled_dot_product_attention(
+                        query_states, key_states, value_states, attention_mask, 0.0, False, None, None)
+        
         else:
             # repeat k/v heads if n_kv_heads < n_heads
             key_states = repeat_kv(key_states, self.num_key_value_groups)
