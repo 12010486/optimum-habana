@@ -82,6 +82,7 @@ python ../gaudi_spawn.py \
     --overwrite_output_dir \
     --use_habana \
     --use_lazy_mode \
+    --use_hpu_graphs_for_training \
     --use_hpu_graphs_for_inference \
     --throughput_warmup_steps 3  \
     --deepspeed path-to-deepspeed-config
