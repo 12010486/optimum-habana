@@ -99,7 +99,12 @@ def setup_lm_eval_parser():
     return args
 
 
-class HabanaModelAdapter(HFLM):
+class HabanaLM(HFLM):
+
+    """
+    using the HuggingFace transformers + optimum-habana backend, can run on Intel Gaudi
+    """
+
     def __init__(
         self,
         tokenizer: AutoTokenizer,
@@ -230,7 +235,7 @@ def main() -> None:
 
     #lm_tasks = lm_eval.tasks.get_task_dict(args.tasks)
     with torch.no_grad():
-        lm = HabanaModelAdapter(tokenizer, model, args, generation_config)
+        lm = HabanaLM(tokenizer, model, args, generation_config)
 
     eval_start = time.perf_counter()
     with torch.no_grad():
