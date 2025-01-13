@@ -150,8 +150,9 @@ class HabanaLM(HFLM):
         model: AutoModelForCausalLM,
         args: argparse.Namespace,
         options: GenerationConfig,
+        **kwargs,
     ) -> None:
-        super().__init__(device=args.device, pretrained=args.model_name_or_path)
+        super().__init__(device=args.device, pretrained=args.model_name_or_path, **kwargs,)
         self.tokenizer = tokenizer
         self._model = model
         self._batch_size = args.batch_size
@@ -254,12 +255,13 @@ class HabanaLM(HFLM):
     ) -> None:
         from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
         adapt_transformers_to_gaudi()
-
+        model_kwargs = kwargs if kwargs else {}
         self._model = self.AUTO_MODEL_CLASS.from_pretrained(
             pretrained,
             revision=revision,
             torch_dtype=get_dtype(dtype),
             trust_remote_code=trust_remote_code,
+            **model_kwargs,
         )
 
 def main() -> None:
