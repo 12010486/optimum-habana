@@ -75,25 +75,71 @@ def setup_lm_eval_parser():
         help="Input length buckets to use with static_shapes",
         default=[16, 32, 64, 128, 189, 284, 384],
     )
-
     parser.add_argument(
-        "--output_file", "-o", type=str, help="Output file with end results and runtime parameters", required=True
+        "--output_path", "-o", type=str, help="Output path with end results and runtime parameters", required=True
     )
     parser.add_argument(
         "--tasks",
         type=str,
         nargs="+",
-        help="Tasks to run",
+        help="Comma-separated list of task names or task groupings to evaluate on.\nTo get full list of tasks, use one of the commands `lm-eval --tasks {{list_groups,list_subtasks,list_tags,list}}` to list out all available names for task groupings; only (sub)tasks; tags; or all of the above",
         default=["hellaswag", "lambada_openai", "piqa", "winogrande"],
     )
-    parser.add_argument("--limit_iters", type=int, help="limit examples to run that many iterations", default=None)
+    parser.add_argument("--limit",
+        "-L",
+        type=float,
+        default=None,
+        help="Limit the number of examples per task. "
+        "If <1, limit is a percentage of the total number of examples.",
+    )
     parser.add_argument(
         "--show_config",
         action="store_true",
         default=False,
         help="If True, shows the the full config of all tasks at the end of the evaluation.",
     )
-
+    parser.add_argument(
+        "--num_fewshot",
+        "-f",
+        type=int,
+        default=None,
+        help="Number of examples in few-shot context",
+    )
+    parser.add_argument(
+        "--write_out",
+        "-w",
+        action="store_true",
+        default=False,
+        help="Prints the prompt for the first few documents.",
+    )
+    parser.add_argument(
+        "--log_samples",
+        "-s",
+        action="store_true",
+        default=False,
+        help="If True, write out all model outputs and documents for per-sample measurement and post-hoc analysis. Use with --output_path.",
+    )
+    parser.add_argument(
+        "--system_instruction",
+        type=str,
+        default=None,
+        help="System instruction to be used in the prompt",
+    )
+    
+    parser.add_argument(
+        "--fewshot_as_multiturn",
+        action="store_true",
+        default=False,
+        help="If True, uses the fewshot as a multi-turn conversation",
+    )
+    parser.add_argument(
+        "--predict_only",
+        "-x",
+        action="store_true",
+        default=False,
+        help="Use with --log_samples. Only model outputs will be saved and metrics will not be evaluated.",
+    )
+    
     args = setup_parser(parser)
 
     return args
