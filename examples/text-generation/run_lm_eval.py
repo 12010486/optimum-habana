@@ -79,10 +79,10 @@ def setup_lm_eval_parser():
     )
     parser.add_argument(
         "--tasks",
+        "-t",
         type=str,
-        nargs="+",
-        help="Comma-separated list of task names or task groupings to evaluate on.\nTo get full list of tasks, use one of the commands `lm-eval --tasks {{list_groups,list_subtasks,list_tags,list}}` to list out all available names for task groupings; only (sub)tasks; tags; or all of the above",
-        default=["hellaswag", "lambada_openai", "piqa", "winogrande"],
+        help="Comma-separated list of task names or task groupings to evaluate on",
+        default="hellaswag,lambada_openai,piqa,winogrande",
     )
     parser.add_argument("--limit",
         "-L",
@@ -267,7 +267,7 @@ class HabanaLM(HFLM):
 def main() -> None:
     # Modified based on cli_evaluate function in https://github.com/EleutherAI/lm-evaluation-harness/blob/v0.4.7/lm_eval/__main__.py/#L268
     args = setup_lm_eval_parser()
-    model, _, tokenizer, generation_config = initialize_model(args, logger)
+    model, _, tokenizer, generation_config = initialize_model(args, eval_logger)
 
     if args.predict_only:
         args.log_samples = True
@@ -355,10 +355,10 @@ def main() -> None:
         system_instruction=args.system_instruction,
         task_manager=task_manager,
         predict_only=args.predict_only,
-        random_seed=args.seed[0],
-        numpy_random_seed=args.seed[1],
-        torch_random_seed=args.seed[2],
-        fewshot_random_seed=args.seed[3],
+        random_seed=args.seed,
+        numpy_random_seed=args.seed,
+        torch_random_seed=args.seed,
+        fewshot_random_seed=args.seed,
         )
 
     if args.device == "hpu":
@@ -376,7 +376,7 @@ def main() -> None:
             for k, v in mem.items():
                 print("{:35} = {} GB".format(k[:-5].replace("_", " ").capitalize(), v))
     
-        json.dump(results, open(args.output_file, "w"), indent=2, default=utils.handle_non_serializable, ensure_ascii=False)
+        json.dump(results, open(args.output_path, "w"), indent=2, default=utils.handle_non_serializable, ensure_ascii=False)
         
         if args.show_config:
             print(json.dumps(results, indent=2,default=utils.handle_non_serializable, ensure_ascii=False))
@@ -386,12 +386,7 @@ def main() -> None:
     if args.const_serialization_path and os.path.isdir(args.const_serialization_path):
         import shutil
 
-        shutil.rmtree(args.const_serialization_path)
-
-    print(
-            f"limit: {args.limit}, num_fewshot: {args.num_fewshot}, "
-            f"batch_size: {args.batch_size}{f' ({batch_sizes})' if batch_sizes else ''}"
-        )
+        shutil.rmtree(args.const_serialization__path)
 
 if __name__ == "__main__":
     main()
