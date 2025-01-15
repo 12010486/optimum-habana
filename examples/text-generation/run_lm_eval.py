@@ -14,7 +14,7 @@
 # limitations under the License.
 
 ###############################################################################
-# Copyright (C) 2020-2024 Habana Labs, Ltd. an Intel Company
+# Copyright (C) 2020-2025 Habana Labs, Ltd. an Intel Company
 ###############################################################################
 
 import argparse
@@ -23,12 +23,12 @@ import multiprocessing as mp
 import os
 import time
 
-from lm_eval import evaluator, tasks, utils
-from lm_eval.models.huggingface import HFLM
-from lm_eval.models.utils import get_dtype
 import psutil
 import torch
 import torch.nn.functional as F
+from lm_eval import evaluator, utils
+from lm_eval.models.huggingface import HFLM
+from lm_eval.models.utils import get_dtype
 
 # Local imports
 from run_generation import setup_parser
@@ -38,7 +38,9 @@ from utils import finalize_quantization, initialize_model
 
 from optimum.habana.utils import get_hpu_memory_stats
 
+
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 eval_logger = utils.eval_logger
 
 # This hack is a workaround to limitations of lm_eval which always allocates
@@ -152,7 +154,7 @@ class HabanaLM(HFLM):
         options: GenerationConfig,
         **kwargs,
     ) -> None:
-        super().__init__(device=args.device, pretrained=args.model_name_or_path, **kwargs,)
+        super().__init__(pretrained=args.model_name_or_path, device=args.device, **kwargs,)
         self.tokenizer = tokenizer
         self._model = model
         self._batch_size = args.batch_size
@@ -198,7 +200,7 @@ class HabanaLM(HFLM):
         for bucket_size in reversed(self.buckets):
             inps = torch.ones((self._batch_size, bucket_size), dtype=torch.int64)
             self._model_call(inps)
-            
+
     @property
     def eot_token_id(self) -> int:
         return self._model.config.eos_token_id
@@ -254,6 +256,7 @@ class HabanaLM(HFLM):
         **kwargs,
     ) -> None:
         from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
+
         adapt_transformers_to_gaudi()
         model_kwargs = kwargs if kwargs else {}
         self._model = self.AUTO_MODEL_CLASS.from_pretrained(
@@ -263,6 +266,7 @@ class HabanaLM(HFLM):
             trust_remote_code=trust_remote_code,
             **model_kwargs,
         )
+
 
 def main() -> None:
     # Modified based on cli_evaluate function in https://github.com/EleutherAI/lm-evaluation-harness/blob/v0.4.7/lm_eval/__main__.py/#L268
@@ -339,7 +343,7 @@ def main() -> None:
         datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = True
 
     eval_logger.info(f"Selected Tasks: {task_names}")
-    #lm_tasks = lm_eval.tasks.get_task_dict(args.tasks)
+
     with torch.no_grad():
         lm = HabanaLM(tokenizer, model, args, generation_config)
 
@@ -375,11 +379,14 @@ def main() -> None:
             mem = get_hpu_memory_stats()
             for k, v in mem.items():
                 print("{:35} = {} GB".format(k[:-5].replace("_", " ").capitalize(), v))
-    
-        json.dump(results, open(args.output_path, "w"), indent=2, default=utils.handle_non_serializable, ensure_ascii=False)
-        
+
+        json.dump(
+            results, open(args.output_file, "w"), indent=2, default=utils.handle_non_serializable, ensure_ascii=False
+        )
+
         if args.show_config:
-            print(json.dumps(results, indent=2,default=utils.handle_non_serializable, ensure_ascii=False))
+            print(json.dumps(results, indent=2, default=utils.handle_non_serializable, ensure_ascii=False))
+    
     if args.quant_config:
         finalize_quantization(model)
 
