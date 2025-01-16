@@ -26,7 +26,7 @@ import time
 import psutil
 import torch
 import torch.nn.functional as F
-from lm_eval import evaluator, utils
+from lm_eval import evaluator, utils, tasks
 from lm_eval.models.huggingface import HFLM
 from lm_eval.models.utils import get_dtype
 
