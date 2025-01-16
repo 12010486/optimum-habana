@@ -381,7 +381,7 @@ def main() -> None:
                 print("{:35} = {} GB".format(k[:-5].replace("_", " ").capitalize(), v))
 
         json.dump(
-            results, open(args.output_file, "w"), indent=2, default=utils.handle_non_serializable, ensure_ascii=False
+            results, open(args.output_path, "w"), indent=2, default=utils.handle_non_serializable, ensure_ascii=False
         )
 
         if args.show_config:
