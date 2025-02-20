@@ -306,7 +306,7 @@ class HabanaModelAdapter(HFLM):
             pad_token_id=self.tokenizer.pad_token_id,
             use_cache=True,
             hpu_graphs=self.hpu_graphs,
-            lazy_mode=True #TODO make it better
+            lazy_mode=True, #TODO make it better
             **generation_kwargs,
         )
 
