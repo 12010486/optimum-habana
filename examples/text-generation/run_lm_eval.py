@@ -159,6 +159,7 @@ class HabanaModelAdapter(HFLM):
         model: AutoModelForCausalLM,
         args: argparse.Namespace,
         options: GenerationConfig,
+        max_length: Optional[int] = None,
         backend: Literal["default", "causal", "seq2seq"] = "default",
         truncation: Optional[bool] = False,
         logits_cache: bool = True,
@@ -184,7 +185,8 @@ class HabanaModelAdapter(HFLM):
         self.logits_cache = logits_cache
         self.add_bos_token = add_bos_token
         self.vocab_size = self._model.config.vocab_size
-        # import pdb; pdb.set_trace()
+        self._max_length = max_length
+        self.hpu_graphs = args.use_hpu_graphs
         if "gemma" in getattr(self._config, "model_type", ""):
             self.add_bos_token = True
             logger.info(
@@ -249,9 +251,9 @@ class HabanaModelAdapter(HFLM):
     def eot_token_id(self) -> int:
         return self._model.config.eos_token_id
 
-    @property
-    def max_length(self) -> int:
-        return self.buckets[-1]
+    #@property
+    #def max_length(self) -> int:
+    #    return self.buckets[-1]
 
     @property
     def device(self):
@@ -303,6 +305,8 @@ class HabanaModelAdapter(HFLM):
             stopping_criteria=stopping_criteria,
             pad_token_id=self.tokenizer.pad_token_id,
             use_cache=True,
+            hpu_graphs=self.hpu_graphs,
+            lazy_mode=True #TODO make it better
             **generation_kwargs,
         )
 
@@ -378,6 +382,7 @@ def main() -> None:
                 )
 
     model, _, tokenizer, generation_config = initialize_model(args, logger)
+
     if args.trust_remote_code:
         # trust_remote_code fix was introduced in lm_eval 0.4.3
         import datasets
