@@ -599,18 +599,18 @@ def setup_tokenizer(args, model, assistant_model, logger):
             if isinstance(model.generation_config.eos_token_id, int):
                 model.generation_config.pad_token_id = model.generation_config.eos_token_id
             elif isinstance(model.generation_config.eos_token_id, list):
-                model.generation_config.pad_token_id = model.generation_config.eos_token_id[0]
+                model.generation_config.pad_token_id = model.generation_config.eos_token_id[-1]
         if assistant_model is not None:
             if assistant_model.generation_config.pad_token_id is None:
                 if isinstance(assistant_model.generation_config.eos_token_id, int):
                     assistant_model.generation_config.pad_token_id = assistant_model.generation_config.eos_token_id
                 elif isinstance(assistant_model.generation_config.eos_token_id, list):
-                    assistant_model.generation_config.pad_token_id = assistant_model.generation_config.eos_token_id[0]
+                    assistant_model.generation_config.pad_token_id = assistant_model.generation_config.eos_token_id[-1]
         tokenizer.bos_token_id = model.generation_config.bos_token_id
         if isinstance(model.generation_config.eos_token_id, int):
             tokenizer.eos_token_id = model.generation_config.eos_token_id
         elif isinstance(model.generation_config.eos_token_id, list):
-            tokenizer.eos_token_id = model.generation_config.eos_token_id[0]
+            tokenizer.eos_token_id = model.generation_config.eos_token_id[-1]
         tokenizer.pad_token_id = model.generation_config.pad_token_id
         tokenizer.pad_token = tokenizer.decode(tokenizer.pad_token_id)
         tokenizer.eos_token = tokenizer.decode(tokenizer.eos_token_id)
@@ -645,7 +645,6 @@ def setup_tokenizer(args, model, assistant_model, logger):
         model.generation_config.pad_token_id = model.generation_config.eos_token_id
         if assistant_model is not None:
             assistant_model.generation_config.pad_token_id = assistant_model.generation_config.eos_token_id
-
     return tokenizer, model, assistant_model
 
 
