@@ -296,6 +296,9 @@ class HabanaModelAdapter(HFLM):
             generation_kwargs.pop("temperature")
         # build stopping criteria
         stopping_criteria = stop_sequences_criteria(self.tokenizer, stop, context.shape[1], context.shape[0])
+        # to avoid graph recompilation
+        if self.options.static_shapes:
+            max_length = max(self.max_gen_toks, self.buckets[-1], 1280)
         # move context & attention_mask to hpu
         context = context.to("hpu")
         generation_kwargs["attention_mask"] = generation_kwargs["attention_mask"].to("hpu")
