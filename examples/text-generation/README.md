@@ -33,7 +33,7 @@ pip install -r requirements_lm_eval.txt
 
 Then, if you plan to use [DeepSpeed-inference](https://docs.habana.ai/en/latest/PyTorch/DeepSpeed/Inference_Using_DeepSpeed.html) (e.g. to use BLOOM/BLOOMZ), you should install DeepSpeed as follows:
 ```bash
-pip install git+https://github.com/HabanaAI/DeepSpeed.git@1.19.0
+pip install git+https://github.com/HabanaAI/DeepSpeed.git@1.20.0
 ```
 
 
@@ -190,6 +190,7 @@ python ../gaudi_spawn.py --use_deepspeed --world_size 8 run_generation.py \
 
 To run Llama3-405B inference on 8 Gaudi3 cards use the following command:
 ```bash
+ENABLE_LB_BUNDLE_ALL_COMPUTE_MME=0 ENABLE_EXPERIMENTAL_FLAGS=1 \
 python ../gaudi_spawn.py --use_deepspeed --world_size 8 run_generation.py \
 --model_name_or_path meta-llama/Llama-3.1-405B-Instruct \
 --max_new_tokens 2048 \
@@ -202,16 +203,17 @@ python ../gaudi_spawn.py --use_deepspeed --world_size 8 run_generation.py \
 --flash_attention_causal_mask
 ```
 
+
 To run Deepseek-R1-BF16 inference on 16 Gaudi3 cards (2 nodes) use the following command. Ensure you replace the hostfile parameter with the appropriate file. Sample hostfile reference [here](https://github.com/huggingface/optimum-habana/blob/main/examples/multi-node-training/hostfile)
 ```bash
-python3 ../gaudi_spawn.py --hostfile=<hostfile> --use_deepspeed \ 
---world_size 16 ./run_generation.py \ 
---model_name_or_path opensourcerelease/DeepSeek-R1-bf16 \ 
---bf16 \ 
+python3 ../gaudi_spawn.py --hostfile=<hostfile> --use_deepspeed \
+--world_size 16 ./run_generation.py \
+--model_name_or_path opensourcerelease/DeepSeek-R1-bf16 \
+--bf16 \
 --trim_logits \
---batch_size 1 \ 
---use_hpu_graphs \ 
---use_kv_cache  \ 
+--batch_size 1 \
+--use_hpu_graphs \
+--use_kv_cache  \
 --parallel_strategy "ep" \
 --prompt "DeepSpeed is a machine learning framework"
 ```
@@ -251,7 +253,8 @@ python run_generation.py \
 --dataset_name JulesBelveze/tldr_news \
 --column_name content \
 --bf16 \
---sdp_on_bf16
+--sdp_on_bf16 \
+--trust_remote_code
 ```
 
 > The prompt length is limited to 16 tokens. Prompts longer than this will be truncated.
@@ -637,7 +640,7 @@ python run_generation.py \
 ### Saving FP8 Checkpoints in Hugging Face format
 After quantizing the model, we can save it to a local path.
 
-> [!NOTE]  
+> [!NOTE]
 > Before executing the command below, please refer to the [Running with FP8](#running-with-fp8) section to measure the model quantization statistics.
 
 Here is an example of how to quantize and save the LLama3.1-70B model on two cards:
@@ -825,8 +828,8 @@ python run_generation.py \
 
 ## Language Model Evaluation Harness
 
-The evaluation of LLMs can be done using the `run_lm_eval.py` script. It utilizes the [LM evaluation harness](https://github.com/EleutherAI/lm-evaluation-harness)
- framework and provides the possibility to run one or more of the multiple tasks supported.
+The evaluation of LLMs can be done using the `lm_eval.py` script. It utilizes the [LM evaluation harness](https://github.com/EleutherAI/lm-evaluation-harness)
+ framework and provides the possibility to run one of four tasks: HellaSwag, Lambada_openai, PiQA, WinoGrande.
 
 For a more detailed description of parameters, please see the help message:
 ```
@@ -841,9 +844,19 @@ First, you should install the requirements:
 pip install -r requirements_lm_eval.txt
 ```
 
+> [!NOTE]
+> Please add the flags for following models to improve accuracy when using lm_eval on gaudi2. Please note this is a workaround for 1.20 release only.
+> 
+> ENABLE_LB_BUNDLE_ALL_COMPUTE_MME=0 COMPLEXGUID_DISABLE_RMS_NORM=true ENABLE_EXPERIMENTAL_FLAGS=true for llama-2-70b-hf[PTQ fp8]
+>
+> COMPLEXGUID_DISABLE_RMS_NORM=true ENABLE_EXPERIMENTAL_FLAGS=true for Llama-3.1-70B-Instruct[PTQ fp8] and llama-2-70b-hf[bf16]
+> 
+> If custom models on hub is being used, please set env variable HF_DATASETS_TRUST_REMOTE_CODE=true instead of arg --trust_remote_code with the installed lm_eval version and dependency datasets==2.21.0
+
+
 ### Examples
 
-Evaluate Llama 7B on Gaudi2 on task PiQA, using the BF16 data type:
+Evaluate Llama 7B on Gaudi on task PiQA, using the BF16 data type:
 ```
 python run_lm_eval.py \
 --model_name_or_path meta-llama/Llama-2-7b-hf \
@@ -853,19 +866,6 @@ python run_lm_eval.py \
 --batch_size=1 \
 --tasks piqa \
 -o eval.json
-```
-
-Evaluate Llama-3.2-1B on Gaudi2 on task MMLU, using the BF16 data type:
-```
-python run_lm_eval.py \
---model_name_or_path meta-llama/Llama-3.2-1B \
---use_hpu_graphs \
---use_kv_cache \
---bf16 \
---batch_size=16 \
---num_fewshot=5 \
---tasks mmlu \
--o eval_mmlu.json
 ```
 
 Evaluate Llama 70B on 8 Gaudi2 cards on task WinoGrande, using the BF16 data type:
@@ -879,23 +879,8 @@ deepspeed --num_gpus 8 run_lm_eval.py \
 --tasks winogrande \
 -o eval.json
 ```
-Evaluate Llama-3.2-3B-Instruct on 8 Gaudi2 on task GSM8K (CoT), using the BF16 data type:
-```
-deepspeed --num_gpus 8 run_lm_eval.py \
---model_name_or_path meta-llama/Llama-3.2-3B-Instruct \
---attn_softmax_bf16 \
---use_hpu_graphs \
---use_kv_cache \
---bf16 \
---sdp_on_bf16 \
---trim_logits \
---batch_size=32 \
---tasks gsm8k_cot_llama \
---num_fewshot=8 \
---fewshot_as_multiturn \
---use_chat_template \
--o eval_gsm8k.json
-```
+
+
 ## Text-Generation Pipeline
 
 A Transformers-like pipeline is defined and provided [here](https://github.com/huggingface/optimum-habana/tree/main/examples/text-generation/text-generation-pipeline). It is optimized for Gaudi and can be called to generate text in your scripts.
