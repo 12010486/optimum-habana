@@ -3,3 +3,5 @@ datasets==2.21.0
 tiktoken
 blobfile
 sentencepiece
+langdetect
+immutabledict
