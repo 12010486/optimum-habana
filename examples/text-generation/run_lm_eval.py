@@ -104,6 +104,7 @@ class HabanaModelAdapter(HFLM):
         args: argparse.Namespace,
         options: GenerationConfig,
         backend: Literal["default", "causal", "seq2seq"] = "default",
+        truncation: Optional[bool] = False,
         logits_cache: bool = True,
         add_bos_token: Optional[bool] = True,
         prefix_token_id: Optional[int] = None,
@@ -125,9 +126,16 @@ class HabanaModelAdapter(HFLM):
         self.custom_prefix_token_id = prefix_token_id
         # determine which of 'causal' and 'seq2seq' backends to use for HF models
         self._get_backend(config=self._config, backend=backend, trust_remote_code=args.trust_remote_code)
+        self.truncation = truncation
         self.logits_cache = logits_cache
         self.add_bos_token = add_bos_token
         self._max_length = options.max_length
+        self.vocab_size = self._model.config.vocab_size
+        if "gemma" in getattr(self._config, "model_type", ""):
+            self.add_bos_token = True
+            logger.info(
+                f"Model type is '{self._config.model_type}', part of the Gemma family--a BOS token will be used as Gemma underperforms without it."
+            )
         self.batch_size_per_gpu = int(args.batch_size)
         self.revision = args.model_revision
         self.model_inputs = {"use_cache": self.options.use_cache}
