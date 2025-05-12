@@ -107,6 +107,7 @@ class HabanaModelAdapter(HFLM):
         backend: Literal["default", "causal", "seq2seq"] = "default",
         truncation: Optional[bool] = False,
         logits_cache: bool = True,
+        max_length: Optional[int] = None,
         add_bos_token: Optional[bool] = True,
         prefix_token_id: Optional[int] = None,
         delta: Optional[str] = None,
@@ -130,7 +131,11 @@ class HabanaModelAdapter(HFLM):
         self.truncation = truncation
         self.logits_cache = logits_cache
         self.add_bos_token = add_bos_token
-        self._max_length = options.max_length
+        self._max_length = max_length
+        self.hpu_graphs = args.use_hpu_graphs
+        self.use_lazy_mode = True
+        if args.torch_compile:
+            self.use_lazy_mode = False
         self.vocab_size = self._model.config.vocab_size
         if "gemma" in getattr(self._config, "model_type", ""):
             self.add_bos_token = True
@@ -196,10 +201,6 @@ class HabanaModelAdapter(HFLM):
         return self._model.config.eos_token_id
 
     @property
-    def max_length(self) -> int:
-        return self.buckets[-1]
-
-    @property
     def device(self):
         # We need to do padding ourselves, otherwise we'll end up with recompilations
         # Returning 'cpu' to keep tensors on CPU in lm_eval code
@@ -245,6 +246,14 @@ class HabanaModelAdapter(HFLM):
             generation_kwargs.pop("temperature")
         # build stopping criteria
         stopping_criteria = stop_sequences_criteria(self.tokenizer, stop, context.shape[1], context.shape[0])
+        # to avoid graph recompilation
+        if self.options.static_shapes:
+            # Filter buckets greater than or equal to the given number
+            greater_or_equal = [x for x in self.buckets if x >= context.shape[1]]
+            # Return the smallest value from the filtered list, or the context shape, if no such value exists
+            bucket = min(greater_or_equal, default=context.shape[1])
+            max_gen_toks = max_length - context.shape[1]
+            max_length = max(max_length, max_gen_toks + bucket)
         # move context & attention_mask to hpu
         context = context.to("hpu")
         generation_kwargs["attention_mask"] = generation_kwargs["attention_mask"].to("hpu")
@@ -254,9 +263,11 @@ class HabanaModelAdapter(HFLM):
             stopping_criteria=stopping_criteria,
             pad_token_id=self.tokenizer.pad_token_id,
             use_cache=True,
+            hpu_graphs=self.hpu_graphs,
+            lazy_mode=self.use_lazy_mode,
             **generation_kwargs,
         )
-        
+
     def get_model_info(self) -> dict:
         """
         Patched method to get Hugging Face model information for experiment reproducibility.
