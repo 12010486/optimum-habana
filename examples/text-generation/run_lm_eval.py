@@ -28,7 +28,6 @@ import torch
 import torch.nn.functional as F
 from lm_eval import evaluator, utils
 from lm_eval.models.huggingface import HFLM, TemplateLM
-from lm_eval.models.utils import stop_sequences_criteria
 
 # Local imports
 from run_generation import setup_parser
@@ -236,24 +235,10 @@ class HabanaModelAdapter(HFLM):
         source: https://github.com/EleutherAI/lm-evaluation-harness/blob/v0.4.7/lm_eval/models/huggingface.py/#L858
         """
 
-        # temperature = 0.0 if not set
-        # if do_sample is false and temp==0.0:
-        # remove temperature, as do_sample=False takes care of this
-        # and we don't want a warning from HF
-        
-        generation_kwargs["temperature"] = generation_kwargs.get("temperature", 0.0)
-        do_sample = generation_kwargs.get("do_sample", None)
-
-        # The temperature has to be a strictly positive float -- if it is 0.0, use greedy decoding strategies
-        if generation_kwargs.get("temperature") == 0.0 and do_sample is None:
-            generation_kwargs["do_sample"] = do_sample = False
-
-        if do_sample is False and generation_kwargs.get("temperature") == 0.0:
-            generation_kwargs.pop("temperature")
-        # build stopping criteria
-        stopping_criteria = stop_sequences_criteria(self.tokenizer, stop, context.shape[1], context.shape[0])
         # to avoid graph recompilation
         if self.options.static_shapes:
+            self.options.bucket_internal = True
+            self.options.bucket_size = self.buckets[-1]
             # Filter buckets greater than or equal to the given number
             greater_or_equal = [x for x in self.buckets if x >= context.shape[1]]
             # Return the smallest value from the filtered list, or the context shape, if no such value exists
@@ -266,13 +251,13 @@ class HabanaModelAdapter(HFLM):
         attention_mask = generation_kwargs["attention_mask"].to("hpu")
         return self.model.generate(
             input_ids=context,
-            max_new_tokens=256,
+            max_new_tokens=max_gen_toks,
             use_cache=True,
             hpu_graphs=self.hpu_graphs,
             lazy_mode=self.use_lazy_mode,
             attention_mask=attention_mask,
+            generation_config=self.options,
         )
-        # generation_config=self.options, this is an issue, degrades perf
 
     def get_model_info(self) -> dict:
         """
