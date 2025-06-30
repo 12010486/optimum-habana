@@ -240,6 +240,7 @@ class HabanaModelAdapter(HFLM):
         # if do_sample is false and temp==0.0:
         # remove temperature, as do_sample=False takes care of this
         # and we don't want a warning from HF
+        
         generation_kwargs["temperature"] = generation_kwargs.get("temperature", 0.0)
         do_sample = generation_kwargs.get("do_sample", None)
 
@@ -262,16 +263,16 @@ class HabanaModelAdapter(HFLM):
         # move context & attention_mask to hpu
         context = context.to("hpu")
         generation_kwargs["attention_mask"] = generation_kwargs["attention_mask"].to("hpu")
+        attention_mask = generation_kwargs["attention_mask"].to("hpu")
         return self.model.generate(
             input_ids=context,
-            max_length=max_length,
-            stopping_criteria=stopping_criteria,
-            pad_token_id=self.tokenizer.pad_token_id,
+            max_new_tokens=256,
             use_cache=True,
             hpu_graphs=self.hpu_graphs,
             lazy_mode=self.use_lazy_mode,
-            **generation_kwargs,
+            attention_mask=attention_mask,
         )
+        # generation_config=self.options, this is an issue, degrades perf
 
     def get_model_info(self) -> dict:
         """
@@ -314,7 +315,6 @@ def main() -> None:
     # Modified based on cli_evaluate function in https://github.com/EleutherAI/lm-evaluation-harness/blob/v0.4.7/lm_eval/__main__.py/#L268
     args = setup_lm_eval_parser()
     model, _, tokenizer, generation_config = initialize_model(args, logger)
-
     with torch.no_grad():
         lm = HabanaModelAdapter(tokenizer, model, args, generation_config)
 
