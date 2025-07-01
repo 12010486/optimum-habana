@@ -238,13 +238,14 @@ class HabanaModelAdapter(HFLM):
         # to avoid graph recompilation
         if self.options.static_shapes:
             self.options.bucket_internal = True
-            self.options.bucket_size = self.buckets[-1]
+            #self.options.bucket_size = self.buckets[-1]
             # Filter buckets greater than or equal to the given number
             greater_or_equal = [x for x in self.buckets if x >= context.shape[1]]
             # Return the smallest value from the filtered list, or the context shape, if no such value exists
             bucket = min(greater_or_equal, default=context.shape[1])
             max_gen_toks = max_length - context.shape[1]
             max_length = max(max_length, max_gen_toks + bucket)
+            self.options.bucket_size = bucket
         # move context & attention_mask to hpu
         context = context.to("hpu")
         generation_kwargs["attention_mask"] = generation_kwargs["attention_mask"].to("hpu")
